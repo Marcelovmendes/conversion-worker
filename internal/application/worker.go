@@ -19,11 +19,8 @@ type worker struct {
 	config    config.WorkerConfig
 }
 
-func NewWorker(
-	queue redis.JobQueue,
-	converter Converter,
-	cfg config.WorkerConfig,
-) Worker {
+func NewWorker(queue redis.JobQueue, converter Converter, cfg config.WorkerConfig) Worker {
+
 	return &worker{
 		queue:     queue,
 		converter: converter,

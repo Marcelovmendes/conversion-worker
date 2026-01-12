@@ -26,15 +26,9 @@ type converter struct {
 	config         config.WorkerConfig
 }
 
-func NewConverter(
-	spotifyClient http.SpotifyClient,
-	youtubeClient http.YouTubeClient,
-	matcher Matcher,
-	conversionRepo postgres.ConversionRepository,
-	logRepo postgres.ConversionLogRepository,
-	statusStore redis.StatusStore,
-	cfg config.WorkerConfig,
-) Converter {
+func NewConverter(spotifyClient http.SpotifyClient, youtubeClient http.YouTubeClient, matcher Matcher, conversionRepo postgres.ConversionRepository,
+	logRepo postgres.ConversionLogRepository, statusStore redis.StatusStore, cfg config.WorkerConfig) Converter {
+
 	return &converter{
 		spotifyClient:  spotifyClient,
 		youtubeClient:  youtubeClient,
@@ -71,6 +65,8 @@ func (c *converter) Convert(ctx context.Context, job *domain.ConversionJob) erro
 	if err != nil {
 		return c.handleError(ctx, conversion, "failed to fetch playlist", err)
 	}
+
+	log.Printf("[DEBUG] fetched playlist %q with %d tracks", playlist.Name, len(playlist.Tracks))
 
 	c.logRepo.Create(ctx, domain.NewFetchPlaylistLog(conversion.ID, domain.LogStatusSuccess, ""))
 

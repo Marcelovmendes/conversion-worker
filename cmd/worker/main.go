@@ -23,7 +23,12 @@ func main() {
 	defer cancel()
 
 	redisClient := redis.NewClient(cfg.Redis)
-	defer redisClient.Close()
+	defer func(redisClient redis.Client) {
+		err := redisClient.Close()
+		if err != nil {
+
+		}
+	}(redisClient)
 
 	if err := redisClient.Ping(ctx); err != nil {
 		log.Fatal("failed to connect to redis: ", err)
@@ -44,12 +49,13 @@ func main() {
 
 	queue := redis.NewJobQueue(redisClient)
 	statusStore := redis.NewStatusStore(redisClient)
+	sessionStore := redis.NewSessionStore(redisClient)
 
 	conversionRepo := postgres.NewConversionRepository(pgClient)
 	logRepo := postgres.NewConversionLogRepository(pgClient)
 
-	spotifyClient := http.NewSpotifyClient(cfg.Services.Spotify)
-	youtubeClient := http.NewYouTubeClient(cfg.Services.YouTube)
+	spotifyClient := http.NewSpotifyClient(cfg.Services.Spotify, sessionStore)
+	youtubeClient := http.NewYouTubeClient(cfg.Services.YouTube, sessionStore)
 
 	matcher := application.NewMatcher(youtubeClient)
 	converter := application.NewConverter(

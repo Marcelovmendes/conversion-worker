@@ -26,7 +26,9 @@ type jobQueue struct {
 }
 
 func NewJobQueue(client Client) JobQueue {
-	return &jobQueue{rdb: client.GetRDB()}
+	return &jobQueue{
+		rdb: client.GetRDB(),
+	}
 }
 
 func (q *jobQueue) Push(ctx context.Context, job *domain.ConversionJob) error {
