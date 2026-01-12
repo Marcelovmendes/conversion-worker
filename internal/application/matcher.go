@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"log"
 	"strings"
 	"sync"
 
@@ -80,61 +81,103 @@ func (m *matcher) MatchTracks(ctx context.Context, tracks []*domain.Track, sessi
 }
 
 func (m *matcher) matchTrack(ctx context.Context, sourceTrack *domain.Track, sessionID string) *domain.TrackMatch {
-	targetTrack, err := m.youtubeClient.SearchTrack(ctx, sourceTrack.Name, sourceTrack.Artist, sessionID)
-	if err != nil {
-		return domain.NewFailedMatch(sourceTrack, err.Error())
+	if match := m.tryISRCSearch(ctx, sourceTrack, sessionID); match != nil {
+		return match
 	}
 
-	if targetTrack == nil {
-		return domain.NewFailedMatch(sourceTrack, "no match found")
+	if match := m.tryMusicSearch(ctx, sourceTrack, sessionID); match != nil {
+		return match
 	}
 
-	confidence, method := evaluateMatch(sourceTrack, targetTrack)
-	if confidence == domain.MatchConfidenceNone {
-		return domain.NewFailedMatch(sourceTrack, "match rejected by filter")
-	}
-
-	return domain.NewTrackMatch(sourceTrack, targetTrack, confidence, method)
+	return domain.NewFailedMatch(sourceTrack, "no match found")
 }
 
-func evaluateMatch(source *domain.Track, target *domain.Track) (domain.MatchConfidence, string) {
-	titleLower := strings.ToLower(target.Name)
+func (m *matcher) tryISRCSearch(ctx context.Context, sourceTrack *domain.Track, sessionID string) *domain.TrackMatch {
+	if sourceTrack.ISRC == "" {
+		return nil
+	}
 
+	targetTrack, err := m.youtubeClient.SearchByISRC(ctx, sourceTrack.ISRC, sessionID)
+	if err != nil {
+		log.Printf("[DEBUG] ISRC search failed for %q: %v", sourceTrack.Name, err)
+		return nil
+	}
+	if targetTrack == nil {
+		return nil
+	}
+
+	return domain.NewTrackMatch(sourceTrack, targetTrack, domain.MatchConfidenceHigh, "isrc")
+}
+
+func (m *matcher) tryMusicSearch(ctx context.Context, sourceTrack *domain.Track, sessionID string) *domain.TrackMatch {
+	log.Printf("[DEBUG] searching YouTube for track=%q artist=%q", sourceTrack.Name, sourceTrack.Artist)
+
+	tracks, err := m.youtubeClient.SearchTrack(ctx, sourceTrack.Name, sourceTrack.Artist, sessionID)
+	if err != nil {
+		log.Printf("[DEBUG] music search failed for %q - %q: %v", sourceTrack.Artist, sourceTrack.Name, err)
+		return nil
+	}
+	if len(tracks) == 0 {
+		log.Printf("[DEBUG] music search returned 0 results for %q - %q", sourceTrack.Artist, sourceTrack.Name)
+		return nil
+	}
+
+	log.Printf("[DEBUG] music search returned %d results", len(tracks))
+
+	for _, targetTrack := range tracks {
+		if isExcluded(targetTrack.Name) {
+			continue
+		}
+
+		confidence := domain.MatchConfidenceLow
+		method := "music_search"
+
+		if hasArtistMatch(sourceTrack, targetTrack) && hasTitleMatch(sourceTrack, targetTrack) {
+			confidence = domain.MatchConfidenceHigh
+			method = "exact_match"
+		} else if hasArtistMatch(sourceTrack, targetTrack) || hasTitleMatch(sourceTrack, targetTrack) {
+			confidence = domain.MatchConfidenceMedium
+			method = "partial_match"
+		}
+
+		return domain.NewTrackMatch(sourceTrack, targetTrack, confidence, method)
+	}
+
+	return nil
+}
+
+func isExcluded(title string) bool {
+	titleLower := strings.ToLower(title)
 	for _, term := range excludeTerms {
 		if strings.Contains(titleLower, term) {
-			return domain.MatchConfidenceNone, ""
+			return true
 		}
 	}
+	return false
+}
 
+func hasArtistMatch(source, target *domain.Track) bool {
 	artistLower := strings.ToLower(source.Artist)
 	targetArtistLower := strings.ToLower(target.Artist)
-	sourceTitleLower := strings.ToLower(source.Name)
+	titleLower := strings.ToLower(target.Name)
 
-	hasArtistMatch := strings.Contains(targetArtistLower, artistLower) ||
+	return strings.Contains(targetArtistLower, artistLower) ||
 		strings.Contains(titleLower, artistLower)
-	hasTitleMatch := strings.Contains(titleLower, sourceTitleLower)
+}
 
-	hasPreferredTerm := false
+func hasTitleMatch(source, target *domain.Track) bool {
+	sourceTitleLower := strings.ToLower(source.Name)
+	targetTitleLower := strings.ToLower(target.Name)
+
+	return strings.Contains(targetTitleLower, sourceTitleLower)
+}
+
+func hasPreferredTerm(title string) bool {
+	titleLower := strings.ToLower(title)
 	for _, term := range preferTerms {
 		if strings.Contains(titleLower, term) {
-			hasPreferredTerm = true
-			break
+			return true
 		}
 	}
-
-	if hasArtistMatch && hasTitleMatch {
-		if hasPreferredTerm {
-			return domain.MatchConfidenceHigh, "exact_match_official"
-		}
-		return domain.MatchConfidenceHigh, "exact_match"
-	}
-
-	if hasArtistMatch || hasTitleMatch {
-		if hasPreferredTerm {
-			return domain.MatchConfidenceMedium, "partial_match_official"
-		}
-		return domain.MatchConfidenceMedium, "partial_match"
-	}
-
-	return domain.MatchConfidenceLow, "first_result"
+	return false
 }
