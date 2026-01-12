@@ -2,22 +2,31 @@ package application
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/domain"
 )
 
 type mockYouTubeClient struct {
-	searchResults map[string]*domain.Track
-	searchError   error
+	isrcResults  map[string]*domain.Track
+	trackResults map[string][]*domain.Track
+	searchError  error
 }
 
-func (m *mockYouTubeClient) SearchTrack(ctx context.Context, trackName, artistName, sessionID string) (*domain.Track, error) {
+func (m *mockYouTubeClient) SearchByISRC(ctx context.Context, isrc, sessionID string) (*domain.Track, error) {
 	if m.searchError != nil {
 		return nil, m.searchError
 	}
-	key := trackName + "|" + artistName
-	return m.searchResults[key], nil
+	return m.isrcResults[isrc], nil
+}
+
+func (m *mockYouTubeClient) SearchTrack(ctx context.Context, track, artist, sessionID string) ([]*domain.Track, error) {
+	if m.searchError != nil {
+		return nil, m.searchError
+	}
+	key := track + "|" + artist
+	return m.trackResults[key], nil
 }
 
 func (m *mockYouTubeClient) CreatePlaylist(ctx context.Context, name, description, sessionID string) (string, string, error) {
@@ -28,26 +37,220 @@ func (m *mockYouTubeClient) AddVideosToPlaylist(ctx context.Context, playlistID 
 	return nil
 }
 
-func TestMatcher_MatchTracks(t *testing.T) {
+func TestMatcher_ISRC(t *testing.T) {
+	ytTrack, _ := domain.NewTrack("Bohemian Rhapsody (Official Video)", "Queen", domain.PlatformYouTube, "yt1")
+
 	mockClient := &mockYouTubeClient{
-		searchResults: map[string]*domain.Track{},
+		isrcResults: map[string]*domain.Track{
+			"GBUM71029604": ytTrack,
+		},
+		trackResults: map[string][]*domain.Track{},
 	}
 
-	track1, _ := domain.NewTrack("Bohemian Rhapsody", "Queen", domain.PlatformSpotify, "sp1")
-	track2, _ := domain.NewTrack("Under Pressure", "Queen", domain.PlatformSpotify, "sp2")
+	sourceTrack, _ := domain.NewTrack("Bohemian Rhapsody", "Queen", domain.PlatformSpotify, "sp1")
+	sourceTrack.WithISRC("GBUM71029604")
 
-	ytTrack1, _ := domain.NewTrack("Queen - Bohemian Rhapsody (Official Video)", "Queen Official", domain.PlatformYouTube, "yt1")
-	ytTrack2, _ := domain.NewTrack("Under Pressure - Queen", "Queen", domain.PlatformYouTube, "yt2")
+	matcher := NewMatcher(mockClient)
+	matches := matcher.MatchTracks(context.Background(), []*domain.Track{sourceTrack}, "session", 1, nil)
 
-	mockClient.searchResults["Bohemian Rhapsody|Queen"] = ytTrack1
-	mockClient.searchResults["Under Pressure|Queen"] = ytTrack2
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
+	}
+
+	if matches[0].Confidence != domain.MatchConfidenceHigh {
+		t.Errorf("expected HIGH confidence, got %v", matches[0].Confidence)
+	}
+
+	if matches[0].MatchMethod != "isrc" {
+		t.Errorf("expected method 'isrc', got %s", matches[0].MatchMethod)
+	}
+}
+
+func TestMatcher_ExactMatch(t *testing.T) {
+	ytTrack, _ := domain.NewTrack("Queen - Bohemian Rhapsody (Official Video)", "Queen", domain.PlatformYouTube, "yt1")
+
+	mockClient := &mockYouTubeClient{
+		isrcResults: map[string]*domain.Track{},
+		trackResults: map[string][]*domain.Track{
+			"Bohemian Rhapsody|Queen": {ytTrack},
+		},
+	}
+
+	sourceTrack, _ := domain.NewTrack("Bohemian Rhapsody", "Queen", domain.PlatformSpotify, "sp1")
+
+	matcher := NewMatcher(mockClient)
+	matches := matcher.MatchTracks(context.Background(), []*domain.Track{sourceTrack}, "session", 1, nil)
+
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
+	}
+
+	if matches[0].Confidence != domain.MatchConfidenceHigh {
+		t.Errorf("expected HIGH confidence, got %v", matches[0].Confidence)
+	}
+
+	if matches[0].MatchMethod != "exact_match" {
+		t.Errorf("expected method 'exact_match', got %s", matches[0].MatchMethod)
+	}
+}
+
+func TestMatcher_PartialMatch(t *testing.T) {
+	ytTrack, _ := domain.NewTrack("Bohemian Rhapsody Audio", "SomeChannel", domain.PlatformYouTube, "yt1")
+
+	mockClient := &mockYouTubeClient{
+		isrcResults: map[string]*domain.Track{},
+		trackResults: map[string][]*domain.Track{
+			"Bohemian Rhapsody|Queen": {ytTrack},
+		},
+	}
+
+	sourceTrack, _ := domain.NewTrack("Bohemian Rhapsody", "Queen", domain.PlatformSpotify, "sp1")
+
+	matcher := NewMatcher(mockClient)
+	matches := matcher.MatchTracks(context.Background(), []*domain.Track{sourceTrack}, "session", 1, nil)
+
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
+	}
+
+	if matches[0].Confidence != domain.MatchConfidenceMedium {
+		t.Errorf("expected MEDIUM confidence, got %v", matches[0].Confidence)
+	}
+
+	if matches[0].MatchMethod != "partial_match" {
+		t.Errorf("expected method 'partial_match', got %s", matches[0].MatchMethod)
+	}
+}
+
+func TestMatcher_LowConfidence(t *testing.T) {
+	ytTrack, _ := domain.NewTrack("Some Music Video", "RandomChannel", domain.PlatformYouTube, "yt1")
+
+	mockClient := &mockYouTubeClient{
+		isrcResults: map[string]*domain.Track{},
+		trackResults: map[string][]*domain.Track{
+			"Bohemian Rhapsody|Queen": {ytTrack},
+		},
+	}
+
+	sourceTrack, _ := domain.NewTrack("Bohemian Rhapsody", "Queen", domain.PlatformSpotify, "sp1")
+
+	matcher := NewMatcher(mockClient)
+	matches := matcher.MatchTracks(context.Background(), []*domain.Track{sourceTrack}, "session", 1, nil)
+
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
+	}
+
+	if matches[0].Confidence != domain.MatchConfidenceLow {
+		t.Errorf("expected LOW confidence, got %v", matches[0].Confidence)
+	}
+
+	if matches[0].MatchMethod != "music_search" {
+		t.Errorf("expected method 'music_search', got %s", matches[0].MatchMethod)
+	}
+}
+
+func TestMatcher_NoResults(t *testing.T) {
+	mockClient := &mockYouTubeClient{
+		isrcResults:  map[string]*domain.Track{},
+		trackResults: map[string][]*domain.Track{},
+	}
+
+	sourceTrack, _ := domain.NewTrack("Unknown Song", "Unknown Artist", domain.PlatformSpotify, "sp1")
+
+	matcher := NewMatcher(mockClient)
+	matches := matcher.MatchTracks(context.Background(), []*domain.Track{sourceTrack}, "session", 1, nil)
+
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
+	}
+
+	if matches[0].Confidence != domain.MatchConfidenceNone {
+		t.Errorf("expected NONE confidence, got %v", matches[0].Confidence)
+	}
+
+	if matches[0].Error == "" {
+		t.Error("expected error message for failed match")
+	}
+}
+
+func TestMatcher_ExcludesCovers(t *testing.T) {
+	ytCover, _ := domain.NewTrack("Bohemian Rhapsody Cover", "CoverChannel", domain.PlatformYouTube, "yt1")
+
+	mockClient := &mockYouTubeClient{
+		isrcResults: map[string]*domain.Track{},
+		trackResults: map[string][]*domain.Track{
+			"Bohemian Rhapsody|Queen": {ytCover},
+		},
+	}
+
+	sourceTrack, _ := domain.NewTrack("Bohemian Rhapsody", "Queen", domain.PlatformSpotify, "sp1")
+
+	matcher := NewMatcher(mockClient)
+	matches := matcher.MatchTracks(context.Background(), []*domain.Track{sourceTrack}, "session", 1, nil)
+
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
+	}
+
+	if matches[0].Confidence != domain.MatchConfidenceNone {
+		t.Errorf("expected NONE confidence (cover excluded), got %v", matches[0].Confidence)
+	}
+}
+
+func TestMatcher_ExcludesLive(t *testing.T) {
+	ytLive, _ := domain.NewTrack("Bohemian Rhapsody Live at Wembley", "Queen", domain.PlatformYouTube, "yt1")
+
+	mockClient := &mockYouTubeClient{
+		isrcResults: map[string]*domain.Track{},
+		trackResults: map[string][]*domain.Track{
+			"Bohemian Rhapsody|Queen": {ytLive},
+		},
+	}
+
+	sourceTrack, _ := domain.NewTrack("Bohemian Rhapsody", "Queen", domain.PlatformSpotify, "sp1")
+
+	matcher := NewMatcher(mockClient)
+	matches := matcher.MatchTracks(context.Background(), []*domain.Track{sourceTrack}, "session", 1, nil)
+
+	if matches[0].Confidence != domain.MatchConfidenceNone {
+		t.Errorf("expected NONE confidence (live excluded), got %v", matches[0].Confidence)
+	}
+}
+
+func TestMatcher_EmptyTracks(t *testing.T) {
+	mockClient := &mockYouTubeClient{}
+	matcher := NewMatcher(mockClient)
+
+	matches := matcher.MatchTracks(context.Background(), nil, "session", 1, nil)
+	if matches != nil {
+		t.Errorf("expected nil for nil tracks, got %v", matches)
+	}
+
+	matches = matcher.MatchTracks(context.Background(), []*domain.Track{}, "session", 1, nil)
+	if matches != nil {
+		t.Errorf("expected nil for empty slice, got %v", matches)
+	}
+}
+
+func TestMatcher_ProgressCallback(t *testing.T) {
+	ytTrack, _ := domain.NewTrack("Track 1", "Artist", domain.PlatformYouTube, "yt1")
+
+	mockClient := &mockYouTubeClient{
+		isrcResults: map[string]*domain.Track{},
+		trackResults: map[string][]*domain.Track{
+			"Track 1|Artist": {ytTrack},
+			"Track 2|Artist": {ytTrack},
+		},
+	}
+
+	track1, _ := domain.NewTrack("Track 1", "Artist", domain.PlatformSpotify, "sp1")
+	track2, _ := domain.NewTrack("Track 2", "Artist", domain.PlatformSpotify, "sp2")
 
 	matcher := NewMatcher(mockClient)
 
-	tracks := []*domain.Track{track1, track2}
 	var progressCalls int
-
-	matches := matcher.MatchTracks(context.Background(), tracks, "session", 2, func(processed, matched, failed int) {
+	matches := matcher.MatchTracks(context.Background(), []*domain.Track{track1, track2}, "session", 2, func(processed, matched, failed int) {
 		progressCalls++
 	})
 
@@ -58,112 +261,115 @@ func TestMatcher_MatchTracks(t *testing.T) {
 	if progressCalls != 2 {
 		t.Errorf("expected 2 progress calls, got %d", progressCalls)
 	}
-
-	for _, match := range matches {
-		if match.Confidence == domain.MatchConfidenceNone {
-			t.Errorf("expected match for %s, got none", match.SourceTrack.Name)
-		}
-	}
 }
 
-func TestMatcher_NoResults(t *testing.T) {
+func TestMatcher_SearchError(t *testing.T) {
 	mockClient := &mockYouTubeClient{
-		searchResults: map[string]*domain.Track{},
+		searchError: errors.New("network error"),
 	}
 
+	sourceTrack, _ := domain.NewTrack("Test Track", "Test Artist", domain.PlatformSpotify, "sp1")
+
 	matcher := NewMatcher(mockClient)
-
-	track, _ := domain.NewTrack("Unknown Song", "Unknown Artist", domain.PlatformSpotify, "sp1")
-	tracks := []*domain.Track{track}
-
-	matches := matcher.MatchTracks(context.Background(), tracks, "session", 1, nil)
+	matches := matcher.MatchTracks(context.Background(), []*domain.Track{sourceTrack}, "session", 1, nil)
 
 	if len(matches) != 1 {
 		t.Fatalf("expected 1 match, got %d", len(matches))
 	}
 
 	if matches[0].Confidence != domain.MatchConfidenceNone {
-		t.Errorf("expected no match, got confidence %v", matches[0].Confidence)
-	}
-
-	if matches[0].Error == "" {
-		t.Error("expected error message for failed match")
+		t.Errorf("expected NONE confidence on error, got %v", matches[0].Confidence)
 	}
 }
 
-func TestMatcher_EmptyTracks(t *testing.T) {
-	mockClient := &mockYouTubeClient{}
-	matcher := NewMatcher(mockClient)
-
-	matches := matcher.MatchTracks(context.Background(), nil, "session", 1, nil)
-
-	if matches != nil {
-		t.Errorf("expected nil for empty tracks, got %v", matches)
-	}
-
-	matches = matcher.MatchTracks(context.Background(), []*domain.Track{}, "session", 1, nil)
-
-	if matches != nil {
-		t.Errorf("expected nil for empty slice, got %v", matches)
-	}
-}
-
-func TestEvaluateMatch(t *testing.T) {
+func TestIsExcluded(t *testing.T) {
 	tests := []struct {
-		name           string
-		sourceTrack    *domain.Track
-		targetTrack    *domain.Track
-		wantConfidence domain.MatchConfidence
+		title    string
+		excluded bool
+	}{
+		{"Bohemian Rhapsody Official Video", false},
+		{"Bohemian Rhapsody Cover", true},
+		{"Bohemian Rhapsody COVER by Someone", true},
+		{"Bohemian Rhapsody Live", true},
+		{"Bohemian Rhapsody Karaoke", true},
+		{"Bohemian Rhapsody Remix", true},
+		{"Bohemian Rhapsody Tutorial", true},
+		{"Bohemian Rhapsody Reaction", true},
+		{"Queen - Bohemian Rhapsody", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.title, func(t *testing.T) {
+			if isExcluded(tt.title) != tt.excluded {
+				t.Errorf("isExcluded(%q) = %v, want %v", tt.title, !tt.excluded, tt.excluded)
+			}
+		})
+	}
+}
+
+func TestHasArtistMatch(t *testing.T) {
+	source, _ := domain.NewTrack("Song", "Queen", domain.PlatformSpotify, "sp1")
+
+	tests := []struct {
+		name     string
+		target   *domain.Track
+		expected bool
 	}{
 		{
-			name:           "exact match with official",
-			sourceTrack:    mustTrack("Bohemian Rhapsody", "Queen"),
-			targetTrack:    mustTrack("Queen - Bohemian Rhapsody (Official Video)", "Queen"),
-			wantConfidence: domain.MatchConfidenceHigh,
+			name:     "artist in channel name",
+			target:   mustTrack("Some Song", "Queen Official"),
+			expected: true,
 		},
 		{
-			name:           "exact match without official",
-			sourceTrack:    mustTrack("Bohemian Rhapsody", "Queen"),
-			targetTrack:    mustTrack("Queen - Bohemian Rhapsody", "Queen Channel"),
-			wantConfidence: domain.MatchConfidenceHigh,
+			name:     "artist in title",
+			target:   mustTrack("Queen - Some Song", "Random Channel"),
+			expected: true,
 		},
 		{
-			name:           "rejected - cover",
-			sourceTrack:    mustTrack("Bohemian Rhapsody", "Queen"),
-			targetTrack:    mustTrack("Bohemian Rhapsody Cover by Someone", "CoverChannel"),
-			wantConfidence: domain.MatchConfidenceNone,
-		},
-		{
-			name:           "rejected - live",
-			sourceTrack:    mustTrack("Bohemian Rhapsody", "Queen"),
-			targetTrack:    mustTrack("Bohemian Rhapsody Live at Wembley", "Queen"),
-			wantConfidence: domain.MatchConfidenceNone,
-		},
-		{
-			name:           "rejected - karaoke",
-			sourceTrack:    mustTrack("Bohemian Rhapsody", "Queen"),
-			targetTrack:    mustTrack("Bohemian Rhapsody Karaoke", "KaraokeChannel"),
-			wantConfidence: domain.MatchConfidenceNone,
-		},
-		{
-			name:           "partial match - title only",
-			sourceTrack:    mustTrack("Bohemian Rhapsody", "Queen"),
-			targetTrack:    mustTrack("Bohemian Rhapsody", "RandomChannel"),
-			wantConfidence: domain.MatchConfidenceMedium,
-		},
-		{
-			name:           "low confidence - no match",
-			sourceTrack:    mustTrack("Bohemian Rhapsody", "Queen"),
-			targetTrack:    mustTrack("Some Random Video", "RandomChannel"),
-			wantConfidence: domain.MatchConfidenceLow,
+			name:     "no match",
+			target:   mustTrack("Some Song", "Random Channel"),
+			expected: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			confidence, _ := evaluateMatch(tt.sourceTrack, tt.targetTrack)
-			if confidence != tt.wantConfidence {
-				t.Errorf("evaluateMatch() confidence = %v, want %v", confidence, tt.wantConfidence)
+			if hasArtistMatch(source, tt.target) != tt.expected {
+				t.Errorf("hasArtistMatch() = %v, want %v", !tt.expected, tt.expected)
+			}
+		})
+	}
+}
+
+func TestHasTitleMatch(t *testing.T) {
+	source, _ := domain.NewTrack("Bohemian Rhapsody", "Queen", domain.PlatformSpotify, "sp1")
+
+	tests := []struct {
+		name     string
+		target   *domain.Track
+		expected bool
+	}{
+		{
+			name:     "title contained",
+			target:   mustTrack("Queen - Bohemian Rhapsody (Official)", "Queen"),
+			expected: true,
+		},
+		{
+			name:     "exact title",
+			target:   mustTrack("Bohemian Rhapsody", "Queen"),
+			expected: true,
+		},
+		{
+			name:     "no match",
+			target:   mustTrack("Another Song", "Queen"),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if hasTitleMatch(source, tt.target) != tt.expected {
+				t.Errorf("hasTitleMatch() = %v, want %v", !tt.expected, tt.expected)
 			}
 		})
 	}
