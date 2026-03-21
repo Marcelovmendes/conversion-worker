@@ -225,7 +225,12 @@ func (c *youtubeClient) CreatePlaylist(ctx context.Context, name, description, s
 		return "", "", fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return result.ID, result.URL, nil
+	playlistURL := result.URL
+	if playlistURL == "" && result.ID != "" {
+		playlistURL = fmt.Sprintf("https://www.youtube.com/playlist?list=%s", result.ID)
+	}
+
+	return result.ID, playlistURL, nil
 }
 
 func (c *youtubeClient) AddVideosToPlaylist(ctx context.Context, playlistID string, videoIDs []string, sessionID string) error {
