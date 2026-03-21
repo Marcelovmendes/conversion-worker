@@ -8,9 +8,18 @@ import (
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/config"
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/domain"
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/http"
-	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/postgres"
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/redis"
 )
+
+type ConversionRepository interface {
+	Create(ctx context.Context, c *domain.Conversion) error
+	Update(ctx context.Context, c *domain.Conversion) error
+}
+
+type ConversionLogRepository interface {
+	Create(ctx context.Context, log *domain.ConversionLog) error
+	CreateBatch(ctx context.Context, logs []*domain.ConversionLog) error
+}
 
 type Converter interface {
 	Convert(ctx context.Context, job *domain.ConversionJob) error
@@ -20,14 +29,14 @@ type converter struct {
 	spotifyClient  http.SpotifyClient
 	youtubeClient  http.YouTubeClient
 	matcher        Matcher
-	conversionRepo postgres.ConversionRepository
-	logRepo        postgres.ConversionLogRepository
+	conversionRepo ConversionRepository
+	logRepo        ConversionLogRepository
 	statusStore    redis.StatusStore
 	config         config.WorkerConfig
 }
 
-func NewConverter(spotifyClient http.SpotifyClient, youtubeClient http.YouTubeClient, matcher Matcher, conversionRepo postgres.ConversionRepository,
-	logRepo postgres.ConversionLogRepository, statusStore redis.StatusStore, cfg config.WorkerConfig) Converter {
+func NewConverter(spotifyClient http.SpotifyClient, youtubeClient http.YouTubeClient, matcher Matcher, conversionRepo ConversionRepository,
+	logRepo ConversionLogRepository, statusStore redis.StatusStore, cfg config.WorkerConfig) Converter {
 
 	return &converter{
 		spotifyClient:  spotifyClient,
@@ -108,6 +117,7 @@ func (c *converter) Convert(ctx context.Context, job *domain.ConversionJob) erro
 
 	description := fmt.Sprintf("Converted from Spotify playlist: %s", playlist.Name)
 	playlistID, playlistURL, err := c.youtubeClient.CreatePlaylist(ctx, job.TargetPlaylistName, description, job.UserID)
+	log.Printf("[DEBUG] PlaylistURL and PlaylistId: %s  %s", playlistURL, playlistID)
 	if err != nil {
 		c.logRepo.Create(ctx, domain.NewCreatePlaylistLog(conversion.ID, domain.LogStatusFailed, err.Error()))
 		return c.handleError(ctx, conversion, "failed to create playlist", err)
@@ -151,7 +161,7 @@ func (c *converter) updateStatus(ctx context.Context, conversion *domain.Convers
 func (c *converter) saveState(ctx context.Context, conversion *domain.Conversion) {
 	c.updateStatus(ctx, conversion)
 	if err := c.conversionRepo.Update(ctx, conversion); err != nil {
-		log.Printf("failed to update conversion in postgres: %v", err)
+		log.Printf("failed to update conversion in dynamodb: %v", err)
 	}
 }
 

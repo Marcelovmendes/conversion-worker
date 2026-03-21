@@ -8,7 +8,7 @@ import (
 
 type Config struct {
 	Redis    RedisConfig
-	Postgres PostgresConfig
+	AWS      AWSConfig
 	Services ServicesConfig
 	Worker   WorkerConfig
 }
@@ -20,13 +20,12 @@ type RedisConfig struct {
 	DB       int
 }
 
-type PostgresConfig struct {
-	Host     string
-	Port     int
-	Database string
-	User     string
-	Password string
-	SSLMode  string
+type AWSConfig struct {
+	Endpoint                string
+	Region                  string
+	SQSQueueURL             string
+	DynamoDBConversionsTable string
+	DynamoDBLogsTable       string
 }
 
 type ServicesConfig struct {
@@ -40,9 +39,8 @@ type ServiceConfig struct {
 }
 
 type WorkerConfig struct {
-	Concurrency  int
-	PollInterval time.Duration
-	JobTimeout   time.Duration
+	Concurrency int
+	JobTimeout  time.Duration
 }
 
 func Load() *Config {
@@ -53,13 +51,12 @@ func Load() *Config {
 			Password: getEnv("REDIS_PASSWORD", ""),
 			DB:       getEnvInt("REDIS_DB", 0),
 		},
-		Postgres: PostgresConfig{
-			Host:     getEnv("POSTGRES_HOST", "localhost"),
-			Port:     getEnvInt("POSTGRES_PORT", 5432),
-			Database: getEnv("POSTGRES_DATABASE", "playswap"),
-			User:     getEnv("POSTGRES_USER", "marcelomendes"),
-			Password: getEnv("POSTGRES_PASSWORD", "developer_user"),
-			SSLMode:  getEnv("POSTGRES_SSLMODE", "disable"),
+		AWS: AWSConfig{
+			Endpoint:                 getEnv("AWS_ENDPOINT", ""),
+			Region:                   getEnv("AWS_REGION", "us-east-1"),
+			SQSQueueURL:              getEnv("SQS_QUEUE_URL", ""),
+			DynamoDBConversionsTable: getEnv("DYNAMODB_CONVERSIONS_TABLE", "playswap-conversions"),
+			DynamoDBLogsTable:        getEnv("DYNAMODB_LOGS_TABLE", "playswap-conversion-logs"),
 		},
 		Services: ServicesConfig{
 			Spotify: ServiceConfig{
@@ -72,15 +69,10 @@ func Load() *Config {
 			},
 		},
 		Worker: WorkerConfig{
-			Concurrency:  getEnvInt("WORKER_CONCURRENCY", 5),
-			PollInterval: getEnvDuration("WORKER_POLL_INTERVAL", 1*time.Second),
-			JobTimeout:   getEnvDuration("WORKER_JOB_TIMEOUT", 5*time.Minute),
+			Concurrency: getEnvInt("WORKER_CONCURRENCY", 5),
+			JobTimeout:  getEnvDuration("WORKER_JOB_TIMEOUT", 5*time.Minute),
 		},
 	}
-}
-
-func (c *PostgresConfig) ConnectionString() string {
-	return "postgres://" + c.User + ":" + c.Password + "@" + c.Host + ":" + strconv.Itoa(c.Port) + "/" + c.Database + "?sslmode=" + c.SSLMode
 }
 
 func (c *RedisConfig) Address() string {

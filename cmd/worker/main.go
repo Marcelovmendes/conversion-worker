@@ -7,17 +7,22 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/application"
-	"github.com/marcelovmendes/playswap/conversion-worker/internal/config"
+	appconfig "github.com/marcelovmendes/playswap/conversion-worker/internal/config"
+	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/dynamodb"
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/http"
-	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/postgres"
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/redis"
+	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/sqs"
 )
 
 func main() {
 	log.Println("starting conversion worker...")
 
-	cfg := config.Load()
+	cfg := appconfig.Load()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -26,7 +31,7 @@ func main() {
 	defer func(redisClient redis.Client) {
 		err := redisClient.Close()
 		if err != nil {
-
+			log.Printf("error closing redis: %v", err)
 		}
 	}(redisClient)
 
@@ -35,24 +40,18 @@ func main() {
 	}
 	log.Println("connected to redis")
 
-	pgClient, err := postgres.NewClient(ctx, cfg.Postgres)
+	awsCfg, err := loadAWSConfig(ctx, cfg.AWS)
 	if err != nil {
-		log.Fatal("failed to connect to postgres: ", err)
+		log.Fatal("failed to load AWS config: ", err)
 	}
-	defer pgClient.Close()
-	log.Println("connected to postgres")
+	log.Println("loaded AWS config")
 
-	if err := postgres.RunMigrations(ctx, pgClient); err != nil {
-		log.Fatal("failed to run migrations: ", err)
-	}
-	log.Println("migrations completed")
-
-	queue := redis.NewJobQueue(redisClient)
+	queue := sqs.NewJobQueue(awsCfg, cfg.AWS.SQSQueueURL)
 	statusStore := redis.NewStatusStore(redisClient)
 	sessionStore := redis.NewSessionStore(redisClient)
 
-	conversionRepo := postgres.NewConversionRepository(pgClient)
-	logRepo := postgres.NewConversionLogRepository(pgClient)
+	conversionRepo := dynamodb.NewConversionRepository(awsCfg, cfg.AWS.DynamoDBConversionsTable)
+	logRepo := dynamodb.NewConversionLogRepository(awsCfg, cfg.AWS.DynamoDBLogsTable)
 
 	spotifyClient := http.NewSpotifyClient(cfg.Services.Spotify, sessionStore)
 	youtubeClient := http.NewYouTubeClient(cfg.Services.YouTube, sessionStore)
@@ -82,4 +81,28 @@ func main() {
 	worker.Run(ctx)
 
 	log.Println("worker stopped")
+}
+
+func loadAWSConfig(ctx context.Context, awsCfg appconfig.AWSConfig) (aws.Config, error) {
+	opts := []func(*config.LoadOptions) error{
+		config.WithRegion(awsCfg.Region),
+	}
+
+	if awsCfg.Endpoint != "" {
+		opts = append(opts,
+			config.WithEndpointResolverWithOptions(
+				aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+					return aws.Endpoint{
+						PartitionID:  "aws",
+						URL:          awsCfg.Endpoint,
+						SigningRegion: region,
+						SigningMethod: "v4",
+					}, nil
+				}),
+			),
+			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
+		)
+	}
+
+	return config.LoadDefaultConfig(ctx, opts...)
 }

@@ -3,24 +3,32 @@ package application
 import (
 	"context"
 	"log"
-	"time"
 
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/config"
-	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/redis"
+	"github.com/marcelovmendes/playswap/conversion-worker/internal/domain"
 )
+
+type QueuedJob struct {
+	Job           *domain.ConversionJob
+	ReceiptHandle string
+}
+
+type JobQueue interface {
+	Receive(ctx context.Context) (*QueuedJob, error)
+	Delete(ctx context.Context, receiptHandle string) error
+}
 
 type Worker interface {
 	Run(ctx context.Context)
 }
 
 type worker struct {
-	queue     redis.JobQueue
+	queue     JobQueue
 	converter Converter
 	config    config.WorkerConfig
 }
 
-func NewWorker(queue redis.JobQueue, converter Converter, cfg config.WorkerConfig) Worker {
-
+func NewWorker(queue JobQueue, converter Converter, cfg config.WorkerConfig) Worker {
 	return &worker{
 		queue:     queue,
 		converter: converter,
@@ -29,33 +37,31 @@ func NewWorker(queue redis.JobQueue, converter Converter, cfg config.WorkerConfi
 }
 
 func (w *worker) Run(ctx context.Context) {
-	log.Printf("worker started, polling every %v", w.config.PollInterval)
-
-	ticker := time.NewTicker(w.config.PollInterval)
-	defer ticker.Stop()
+	log.Println("worker started with long-polling")
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("worker shutting down...")
 			return
-		case <-ticker.C:
+		default:
 			w.processNextJob(ctx)
 		}
 	}
 }
 
 func (w *worker) processNextJob(ctx context.Context) {
-	job, err := w.queue.Pop(ctx, w.config.PollInterval)
+	queued, err := w.queue.Receive(ctx)
 	if err != nil {
 		log.Printf("error polling queue: %v", err)
 		return
 	}
 
-	if job == nil {
+	if queued == nil {
 		return
 	}
 
+	job := queued.Job
 	log.Printf("received job %s: %s -> %s", job.JobID, job.SourcePlatform, job.TargetPlatform)
 
 	jobCtx, cancel := context.WithTimeout(ctx, w.config.JobTimeout)
@@ -63,5 +69,10 @@ func (w *worker) processNextJob(ctx context.Context) {
 
 	if err := w.converter.Convert(jobCtx, job); err != nil {
 		log.Printf("job %s failed: %v", job.JobID, err)
+		return
+	}
+
+	if err := w.queue.Delete(ctx, queued.ReceiptHandle); err != nil {
+		log.Printf("failed to delete job %s from queue: %v", job.JobID, err)
 	}
 }

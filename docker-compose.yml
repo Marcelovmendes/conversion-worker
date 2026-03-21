@@ -6,17 +6,12 @@ services:
     volumes:
       - redis_data:/data
 
-  postgres:
-    image: postgres:16-alpine
+  localstack:
+    image: localstack/localstack
     ports:
-      - "5432:5432"
+      - "4566:4566"
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: playswap
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - SERVICES=sqs,dynamodb
 
 volumes:
   redis_data:
-  postgres_data:
