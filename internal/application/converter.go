@@ -72,12 +72,17 @@ func (c *converter) Convert(ctx context.Context, job *domain.ConversionJob) erro
 
 	playlist, err := c.spotifyClient.GetPlaylistTracks(ctx, job.SourcePlaylistID, job.UserID)
 	if err != nil {
+		if logErr := c.logRepo.Create(ctx, domain.NewFetchPlaylistLog(conversion.ID, domain.LogStatusFailed, err.Error())); logErr != nil {
+			log.Printf("failed to save fetch playlist failure log: %v", logErr)
+		}
 		return c.handleError(ctx, conversion, "failed to fetch playlist", err)
 	}
 
 	log.Printf("[DEBUG] fetched playlist %q with %d tracks", playlist.Name, len(playlist.Tracks))
 
-	c.logRepo.Create(ctx, domain.NewFetchPlaylistLog(conversion.ID, domain.LogStatusSuccess, ""))
+	if err := c.logRepo.Create(ctx, domain.NewFetchPlaylistLog(conversion.ID, domain.LogStatusSuccess, "")); err != nil {
+		log.Printf("failed to save fetch playlist log: %v", err)
+	}
 
 	tracks := playlist.Tracks
 	if len(job.SelectedTrackIDs) > 0 {
@@ -119,14 +124,31 @@ func (c *converter) Convert(ctx context.Context, job *domain.ConversionJob) erro
 	playlistID, playlistURL, err := c.youtubeClient.CreatePlaylist(ctx, job.TargetPlaylistName, description, job.UserID)
 	log.Printf("[DEBUG] PlaylistURL and PlaylistId: %s  %s", playlistURL, playlistID)
 	if err != nil {
-		c.logRepo.Create(ctx, domain.NewCreatePlaylistLog(conversion.ID, domain.LogStatusFailed, err.Error()))
+		if logErr := c.logRepo.Create(ctx, domain.NewCreatePlaylistLog(conversion.ID, domain.LogStatusFailed, err.Error())); logErr != nil {
+			log.Printf("failed to save create playlist failure log: %v", logErr)
+		}
 		return c.handleError(ctx, conversion, "failed to create playlist", err)
 	}
 
-	c.logRepo.Create(ctx, domain.NewCreatePlaylistLog(conversion.ID, domain.LogStatusSuccess, ""))
+	if err := c.logRepo.Create(ctx, domain.NewCreatePlaylistLog(conversion.ID, domain.LogStatusSuccess, "")); err != nil {
+		log.Printf("failed to save create playlist log: %v", err)
+	}
 
 	if err := c.youtubeClient.AddVideosToPlaylist(ctx, playlistID, matchedVideoIDs, job.UserID); err != nil {
+		if logErr := c.logRepo.Create(ctx, domain.NewAddTrackLog(conversion.ID, nil, domain.LogStatusFailed, err.Error())); logErr != nil {
+			log.Printf("failed to save add track failure log: %v", logErr)
+		}
 		return c.handleError(ctx, conversion, "failed to add videos to playlist", err)
+	}
+
+	var addLogs []*domain.ConversionLog
+	for _, match := range matches {
+		if match.Confidence != domain.MatchConfidenceNone {
+			addLogs = append(addLogs, domain.NewAddTrackLog(conversion.ID, match.TargetTrack, domain.LogStatusSuccess, ""))
+		}
+	}
+	if err := c.logRepo.CreateBatch(ctx, addLogs); err != nil {
+		log.Printf("failed to save add track logs: %v", err)
 	}
 
 	conversion.Complete(playlistID, playlistURL)
