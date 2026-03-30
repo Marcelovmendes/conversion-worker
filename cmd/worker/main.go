@@ -17,12 +17,16 @@ import (
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/http"
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/redis"
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/sqs"
+	"github.com/marcelovmendes/playswap/conversion-worker/internal/metrics"
 )
 
 func main() {
 	log.Println("starting conversion worker...")
 
 	cfg := appconfig.Load()
+
+	metrics.StartServer(":9092")
+	log.Println("metrics server started on :9092")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

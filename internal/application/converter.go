@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/config"
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/domain"
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/http"
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/redis"
+	"github.com/marcelovmendes/playswap/conversion-worker/internal/metrics"
 )
 
 type ConversionRepository interface {
@@ -50,18 +52,30 @@ func NewConverter(spotifyClient http.SpotifyClient, youtubeClient http.YouTubeCl
 }
 
 func (c *converter) Convert(ctx context.Context, job *domain.ConversionJob) error {
+	metrics.JobsReceived.Inc()
+	metrics.JobsInProgress.Inc()
+	start := time.Now()
+
+	defer func() {
+		metrics.JobsInProgress.Dec()
+		metrics.JobDuration.Observe(time.Since(start).Seconds())
+	}()
+
 	conversion, err := domain.NewConversion(job)
 	if err != nil {
+		metrics.JobsFailed.WithLabelValues("create_conversion").Inc()
 		return fmt.Errorf("failed to create conversion: %w", err)
 	}
 
 	if err := c.conversionRepo.Create(ctx, conversion); err != nil {
+		metrics.JobsFailed.WithLabelValues("persist_conversion").Inc()
 		return fmt.Errorf("failed to persist conversion: %w", err)
 	}
 
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("panic during conversion %s: %v", conversion.ID, r)
+			metrics.JobsFailed.WithLabelValues("panic").Inc()
 			conversion.Fail(fmt.Sprintf("internal error: %v", r))
 			c.saveState(ctx, conversion)
 		}
@@ -153,6 +167,7 @@ func (c *converter) Convert(ctx context.Context, job *domain.ConversionJob) erro
 
 	conversion.Complete(playlistID, playlistURL)
 	c.saveState(ctx, conversion)
+	metrics.JobsCompleted.Inc()
 
 	log.Printf("conversion %s completed: %d/%d tracks matched, playlist: %s",
 		conversion.ID, conversion.MatchedTracks, conversion.TotalTracks, playlistURL)
@@ -166,6 +181,7 @@ func (c *converter) handleError(ctx context.Context, conversion *domain.Conversi
 		fullMessage = fmt.Sprintf("%s: %v", message, err)
 	}
 
+	metrics.JobsFailed.WithLabelValues(message).Inc()
 	conversion.Fail(fullMessage)
 	c.saveState(ctx, conversion)
 

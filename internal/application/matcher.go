@@ -8,6 +8,7 @@ import (
 
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/domain"
 	"github.com/marcelovmendes/playswap/conversion-worker/internal/infrastructure/http"
+	"github.com/marcelovmendes/playswap/conversion-worker/internal/metrics"
 )
 
 var excludeTerms = []string{"cover", "live", "karaoke", "remix", "tutorial", "reaction"}
@@ -68,8 +69,10 @@ func (m *matcher) MatchTracks(ctx context.Context, tracks []*domain.Track, sessi
 
 		if match.Confidence != domain.MatchConfidenceNone {
 			matched++
+			metrics.TracksMatched.Inc()
 		} else {
 			failed++
+			metrics.TracksNotFound.Inc()
 		}
 
 		if onProgress != nil {
